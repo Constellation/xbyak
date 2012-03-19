@@ -93,13 +93,110 @@ void test1()
 			sprintf(&buf[j * 2], "%02X", q[j]);
 		}
 		if (strcmp(buf, p->result) != 0) {
-			printf("error %d assume:%s, err=%s\n", i, p->result, buf);
+			printf("error %d assume:%s, err=%s\n", (int)i, p->result, buf);
 		} else {
-			printf("ok %d\n", i);
+			printf("ok %d\n", (int)i);
 		}
 	}
 }
 
+struct TestJmp2 : public CodeGenerator {
+	void putNop(int n)
+	{
+		for (int i = 0; i < n; i++) {
+			nop();
+		}
+	}
+/*
+  1 00000000 90                      nop
+  2 00000001 90                      nop
+  3                                  f1:
+  4 00000002 <res 0000007E>          dummyX1 resb 126
+  6 00000080 EB80                     jmp f1
+  7
+  8                                  f2:
+  9 00000082 <res 0000007F>          dummyX2 resb 127
+ 11 00000101 E97CFFFFFF               jmp f2
+ 12
+ 13
+ 14 00000106 EB7F                    jmp f3
+ 15 00000108 <res 0000007F>          dummyX3 resb 127
+ 17                                  f3:
+ 18
+ 19 00000187 E980000000              jmp f4
+ 20 0000018C <res 00000080>          dummyX4 resb 128
+ 22                                  f4:
+*/
+	explicit TestJmp2(void *p)
+		: Xbyak::CodeGenerator(8192, p)
+	{
+		inLocalLabel();
+		nop();
+		nop();
+	L(".f1");
+		putNop(126);
+		jmp(".f1");
+	L(".f2");
+		putNop(127);
+		jmp(".f2", T_NEAR);
+
+		jmp(".f3");
+		putNop(127);
+	L(".f3");
+		jmp(".f4", T_NEAR);
+		putNop(128);
+	L(".f4");
+		outLocalLabel();
+	}
+};
+
+void test2()
+{
+	puts("test2");
+	std::string ok;
+	ok.resize(0x18C + 128, 0x90);
+	ok[0x080] = 0xeb;
+	ok[0x081] = 0x80;
+
+	ok[0x101] = 0xe9;
+	ok[0x102] = 0x7c;
+	ok[0x103] = 0xff;
+	ok[0x104] = 0xff;
+	ok[0x105] = 0xff;
+
+	ok[0x106] = 0xeb;
+	ok[0x107] = 0x7f;
+
+	ok[0x187] = 0xe9;
+	ok[0x188] = 0x80;
+	ok[0x189] = 0x00;
+	ok[0x18a] = 0x00;
+	ok[0x18b] = 0x00;
+	for (int j = 0; j < 2; j++) {
+		TestJmp2 c(j == 0 ? 0 : Xbyak::AutoGrow);
+		c.ready();
+		std::string m((const char*)c.getCode(), c.getSize());
+		if (m.size() != ok.size()) {
+			printf("test2 err %d %d\n", (int)m.size(), (int)ok.size());
+		} else {
+			if (m != ok) {
+				for (size_t i = 0; i < m.size(); i++) {
+					if (m[i] != ok[i]) {
+						printf("diff 0x%03x %02x %02x\n", (int)i, (unsigned char)m[i], (unsigned char)ok[i]);
+					}
+				}
+			} else {
+				puts("ok");
+			}
+		}
+	}
+}
+
+#if !defined(_WIN64) && !defined(__x86_64__)
+	#define ONLY_32BIT
+#endif
+
+#ifdef ONLY_32BIT
 int add5(int x) { return x + 5; }
 int add2(int x) { return x + 2; }
 
@@ -121,7 +218,7 @@ struct Grow : Xbyak::CodeGenerator {
 	}
 };
 
-void test2()
+void test3()
 {
 	for (int dummySize = 0; dummySize < 40000; dummySize += 10000) {
 		printf("dummySize=%d\n", dummySize);
@@ -137,12 +234,16 @@ void test2()
 		}
 	}
 }
+#endif
 
 int main()
 {
 	try {
 		test1();
 		test2();
+#ifdef ONLY_32BIT
+		test3();
+#endif
 	} catch (Xbyak::Error err) {
 		printf("ERR:%s(%d)\n", Xbyak::ConvertErrorToString(err), err);
 	} catch (...) {

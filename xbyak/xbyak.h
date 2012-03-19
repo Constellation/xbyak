@@ -5,9 +5,7 @@
 	@file xbyak.h
 	@brief Xbyak ; JIT assembler for x86(IA32)/x64 by C++
 	@author herumi
-	@version $Revision: 1.268 $
-	@url http://homepage1.nifty.com/herumi/soft/xbyak.html
-	@date $Date: 2012/03/16 14:43:46 $
+	@url http://homepage1.nifty.com/herumi/soft/xbyak_e.html
 	@note modified new BSD license
 	http://opensource.org/licenses/BSD-3-Clause
 */
@@ -112,7 +110,7 @@ enum Error {
 	ERR_INTERNAL
 };
 
-static inline const char *ConvertErrorToString(Error err)
+inline const char *ConvertErrorToString(Error err)
 {
 	static const char errTbl[][40] = {
 		"none",
@@ -159,7 +157,7 @@ namespace inner {
 
 enum { debug = 1 };
 
-static inline uint32 GetPtrDist(const void *p1, const void *p2)
+inline uint32 GetPtrDist(const void *p1, const void *p2)
 {
 	uint64 diff = static_cast<const char *>(p1) - static_cast<const char *>(p2);
 #ifdef XBYAK64
@@ -168,8 +166,17 @@ static inline uint32 GetPtrDist(const void *p1, const void *p2)
 	return static_cast<uint32>(diff);
 }
 
-static inline bool IsInDisp8(uint32 x) { return 0xFFFFFF80 <= x || x <= 0x7F; }
-static inline bool IsInInt32(uint64 x) { return 0xFFFFFFFF80000000ULL <= x || x <= 0x7FFFFFFFU; }
+inline uint32 GetOffsetDist(size_t p1, size_t p2)
+{
+	uint64 diff = p1 - p2;
+#ifdef XBYAK64
+	if (0x7FFFFFFFULL < diff && diff < 0xFFFFFFFF80000000ULL) throw ERR_OFFSET_IS_TOO_BIG;
+#endif
+	return static_cast<uint32>(diff);
+}
+
+inline bool IsInDisp8(uint32 x) { return 0xFFFFFF80 <= x || x <= 0x7F; }
+inline bool IsInInt32(uint64 x) { return 0xFFFFFFFF80000000ULL <= x || x <= 0x7FFFFFFFU; }
 
 }
 
@@ -191,7 +198,7 @@ public:
 		FPU = 1 << 6,
 		YMM = 1 << 7
 	};
-	enum Code {
+	enum Test2 {
 #ifdef XBYAK64
 		RAX = 0, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15,
 		R8D = 8, R9D, R10D, R11D, R12D, R13D, R14D, R15D,
@@ -415,8 +422,10 @@ class CodeArray {
 		MAX_FIXED_BUF_SIZE = 8
 	};
 	void operator=(const CodeArray&);
-	void resize(size_t newSize)
+protected:
+	void growMemory()
 	{
+		const size_t newSize = maxSize_ + ALIGN_PAGE_SIZE;
 		uint8 *newAllocPtr = reinterpret_cast<uint8*>(alloc_->alloc(newSize + ALIGN_PAGE_SIZE));
 		if (newAllocPtr == 0) throw ERR_CANT_ALLOC;
 		uint8 *newTop = getAlignedAddress(newAllocPtr, ALIGN_PAGE_SIZE);
@@ -426,14 +435,12 @@ class CodeArray {
 		top_ = newTop;
 		maxSize_ = newSize;
 	}
-protected:
 	enum Type {
 		FIXED_BUF, // use buf_(non alignment, non protect)
 		USER_BUF, // use userPtr(non alignment, non protect)
 		ALLOC_BUF, // use new(alignment, protect)
 		AUTO_GROW // automatically move and grow memory if necessary
 	};
-	bool isAutoGrow() const { return type_ == AUTO_GROW; }
 private:
 	bool isAllocType() const { return type_ == ALLOC_BUF || type_ == AUTO_GROW; }
 	Type getType(size_t maxSize, void *userPtr) const
@@ -451,6 +458,14 @@ protected:
 	size_t maxSize_;
 	uint8 *top_;
 	size_t size_;
+	struct AddrInfo2 {
+		size_t offset_;
+		uint32 disp_;
+		int size_;
+		AddrInfo2(size_t offset, uint32 disp, int size) : offset_(offset), disp_(disp), size_(size) { }
+	};
+	typedef std::list<AddrInfo2> AddrInfo2List;
+	AddrInfo2List addrInfo2List_;
 public:
 	CodeArray(size_t maxSize = MAX_FIXED_BUF_SIZE, void *userPtr = 0, Allocator *allocator = 0)
 		: type_(getType(maxSize, userPtr))
@@ -488,7 +503,7 @@ public:
 	{
 		if (size_ >= maxSize_) {
 			if (type_ == AUTO_GROW) {
-				resize(maxSize_ + ALIGN_PAGE_SIZE);
+				growMemory();
 			} else {
 				throw ERR_CODE_IS_TOO_BIG;
 			}
@@ -532,16 +547,23 @@ public:
 		}
 	}
 	/*
-		@param data [in] address of jmp data
+		@param offset [in] offset from top
 		@param disp [in] offset from the next of jmp
 		@param size [in] write size(1, 2, 4, 8)
 	*/
-	void rewrite(uint8 *data, uint64 disp, size_t size)
+	void rewrite(size_t offset, uint64 disp, size_t size)
 	{
+		assert(offset < maxSize_);
 		if (size != 1 && size != 2 && size != 4 && size != 8) throw ERR_BAD_PARAMETER;
+		uint8 *const data = top_ + offset;
 		for (size_t i = 0; i < size; i++) {
 			data[i] = static_cast<uint8>(disp >> (i * 8));
 		}
+	}
+	bool isAutoGrow() const { return type_ == AUTO_GROW; }
+	void save(size_t offset, uint32 disp, size_t size)
+	{
+		addrInfo2List_.push_back(AddrInfo2(offset, disp, size));
 	}
 	void updateRegField(uint8 regIdx) const
 	{
@@ -705,7 +727,7 @@ public:
 };
 
 struct JmpLabel {
-	uint8 *endOfJmp; /* end address of jmp */
+	size_t endOfJmp; /* offset from top to the end address of jmp */
 	bool isShort;
 };
 
@@ -780,11 +802,15 @@ public:
 			UndefinedList::iterator itr = undefinedList_.find(label);
 			if (itr == undefinedList_.end()) break;
 			const JmpLabel *jmp = &itr->second;
-			uint32 disp = inner::GetPtrDist(address, jmp->endOfJmp);
+			uint32 disp = inner::GetOffsetDist(address - base_->getCode(), jmp->endOfJmp);
 			if (jmp->isShort && !inner::IsInDisp8(disp)) throw ERR_LABEL_IS_TOO_FAR;
 			size_t jmpSize = jmp->isShort ? 1 : 4;
-			uint8 *data = jmp->endOfJmp - jmpSize;
-			base_->rewrite(data, disp, jmpSize);
+			size_t offset = jmp->endOfJmp - jmpSize;
+			if (base_->isAutoGrow()) {
+				base_->save(offset, disp, jmpSize);
+			} else {
+				base_->rewrite(offset, disp, jmpSize);
+			}
 			undefinedList_.erase(itr);
 		}
 	}
@@ -939,10 +965,9 @@ private:
 			const int shortJmpSize = shortHeaderSize + 1; /* +1 means 8-bit displacement */
 			const int longHeaderSize = longPref ? 2 : 1;
 			const int longJmpSize = longHeaderSize + 4; /* +4 means 32-bit displacement */
-			uint8 *top = const_cast<uint8*>(getCurr());
 			bool isShort = (type != T_NEAR);
 			JmpLabel jmp;
-			jmp.endOfJmp = top + (isShort ? shortJmpSize : longJmpSize);
+			jmp.endOfJmp = getSize() + (isShort ? shortJmpSize : longJmpSize);
 			jmp.isShort = isShort;
 			if (isShort) {
 				db(shortCode);
@@ -964,12 +989,19 @@ private:
 	AddrInfoList addrInfoList_;
 	void opJmp(const void *addr, LabelType type, uint8 shortCode, uint8 longCode, uint8 longPref, bool isLabel = false)
 	{
-		bool isAuto = !isLabel && isAutoGrow();
-		if (isAuto && type != T_NEAR) throw ERR_ONLY_T_NEAR_IS_SUPPORTED_IN_AUTO_GROW;
 		const int shortHeaderSize = 1;
 		const int shortJmpSize = shortHeaderSize + 1; /* +1 means 8-bit displacement */
 		const int longHeaderSize = longPref ? 2 : 1;
 		const int longJmpSize = longHeaderSize + 4; /* +4 means 32-bit displacement */
+		if (!isLabel && isAutoGrow()) {
+			if (type != T_NEAR) throw ERR_ONLY_T_NEAR_IS_SUPPORTED_IN_AUTO_GROW;
+			if (size_ + 16 >= maxSize_) growMemory();
+			if (longPref) db(longPref);
+			db(longCode);
+			addrInfoList_.push_back(AddrInfo(size_, reinterpret_cast<const uint8*>(addr) - longJmpSize + 1));
+			dd(0);
+			return;
+		}
 
 		uint32 disp = inner::GetPtrDist(addr, getCurr());
 		if (type != T_NEAR && inner::IsInDisp8(disp - shortJmpSize)) {
@@ -979,12 +1011,7 @@ private:
 			if (type == T_SHORT) throw ERR_LABEL_IS_TOO_FAR;
 			if (longPref) db(longPref);
 			db(longCode);
-			if (isAuto) {
-				addrInfoList_.push_back(AddrInfo(size_, reinterpret_cast<const uint8*>(addr) - longJmpSize + 1));
-				dd(0);
-			} else {
-				dd(disp - longJmpSize);
-			}
+			dd(disp - longJmpSize);
 		}
 	}
 	/* preCode is for SSSE3/SSE4 */
@@ -1545,8 +1572,8 @@ public:
 	}
 	enum { NONE = 256 };
 public:
-	CodeGenerator(size_t maxSize = DEFAULT_MAX_CODE_SIZE, void *userPtr = 0)
-		: CodeArray(maxSize, userPtr)
+	CodeGenerator(size_t maxSize = DEFAULT_MAX_CODE_SIZE, void *userPtr = 0, Allocator *allocator = 0)
+		: CodeArray(maxSize, userPtr, allocator)
 		, mm0(0), mm1(1), mm2(2), mm3(3), mm4(4), mm5(5), mm6(6), mm7(7)
 		, xmm0(0), xmm1(1), xmm2(2), xmm3(3), xmm4(4), xmm5(5), xmm6(6), xmm7(7)
 		, ymm0(0), ymm1(1), ymm2(2), ymm3(3), ymm4(4), ymm5(5), ymm6(6), ymm7(7)
@@ -1575,7 +1602,7 @@ public:
 	bool hasUndefinedLabel() const { return label_.hasUndefinedLabel(); }
 	const uint8 *getCode() const
 	{
-		assert(!hasUndefinedLabel());
+//		assert(!hasUndefinedLabel());
 		return top_;
 	}
 	/*
@@ -1585,7 +1612,10 @@ public:
 	{
 		if (hasUndefinedLabel()) throw ERR_LABEL_IS_NOT_FOUND;
 		for (AddrInfoList::const_iterator i = addrInfoList_.begin(), ie = addrInfoList_.end(); i != ie; ++i) {
-			rewrite(top_ + i->offset_, (uint32)(i->addr_ - (top_ + i->offset_)), 4);
+			rewrite(i->offset_, (uint32)(i->addr_ - (top_ + i->offset_)), 4);
+		}
+		for (AddrInfo2List::const_iterator i = addrInfo2List_.begin(), ie = addrInfo2List_.end(); i != ie; ++i) {
+			rewrite(i->offset_, i->disp_, i->size_);
 		}
 		if (!protect(top_, size_, ReadWriteExecMode)) throw ERR_CANT_PROTECT;
 	}
