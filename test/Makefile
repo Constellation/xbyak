@@ -1,8 +1,8 @@
-TARGET = make_nm normalize_prefix
+TARGET = make_nm normalize_prefix grow
 XBYAK_INC=../xbyak/xbyak.h
 
 ifeq ($(MODE_BIT),64)
-	RARGET += jmp64
+	TARGET += jmp64
 else
 endif
 
